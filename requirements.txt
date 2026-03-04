@@ -1,0 +1,24 @@
+# Core Deep Learning and Quantum ML
+# tensorflow>=2.20.0
+# pennylane>=0.34.0
+
+# Numerical Computing
+numpy>=1.24.0
+
+# Image Processing
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# Machine Learning Utilities
+scikit-learn>=1.3.0
+
+# Visualization
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Additional Dependencies
+argparse  # Usually built-in but explicit for safety
+
+# Optional but recommended for performance
+tensorflow-gpu>=2.20.0  # Uncomment if using GPU
+pennylane[tf]>=0.34.0   # Uncomment for TensorFlow interface optimization
