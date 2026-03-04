@@ -27,6 +27,10 @@ WEIGHT_DECAY = 1e-4
 WARMUP_EPOCHS = 10
 EARLY_STOPPING_PATIENCE = 15
 
+# Classification head dropout (used by quantum/classical model)
+# this value is scaled internally for the successive dense layers
+HEAD_DROPOUT = 0.3
+
 ## Quantum Circuit Configuration
 N_QUBITS = 4
 N_LAYERS = 4
