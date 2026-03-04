@@ -1,0 +1,31 @@
+# ── Dataset & large data files ───────────────────────────────────────────────
+archive/
+archive.zip
+*.zip
+
+# ── Cached numpy/npz feature arrays (large, reproducible) ───────────────────
+quantum_features/
+cached_quantum_features/
+*.npy
+*.npz
+
+# ── Saved model weights ──────────────────────────────────────────────────────
+*.keras
+*.h5
+*.pt
+*.pth
+pretrained_quantum/
+
+# ── Result images are committed; keep everything else out ───────────────────
+# (training_history.png and test_results.txt are included — see below)
+
+# ── Python cache ─────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── Misc ─────────────────────────────────────────────────────────────────────
+.DS_Store
+*.egg-info/
+.env
