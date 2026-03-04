@@ -41,35 +41,49 @@ class QuantumImagePreprocessor(tf.keras.layers.Layer):
         
         # Create quantum device and circuit
         self.dev = qml.device("default.qubit", wires=n_qubits)
-        self.qlayer = self._make_quantum_layer()
-        
-    def _make_quantum_layer(self):
-        """Create the quantum circuit layer for image preprocessing."""
-        
+
+        # Build qnode and weight variable manually (qml.qnn.KerasLayer removed in 0.44)
         @qml.qnode(self.dev, interface="tf", diff_method="backprop")
         def quantum_circuit(inputs, weights):
             # Encode 2x2 image patch into quantum state
             # inputs shape: (4,) for a 2x2 patch
+            pi = np.pi  # Use numpy pi, not tf constant
             for i in range(self.n_qubits):
                 # Amplitude encoding with rotation gates
-                qml.RX(inputs[i] * np.pi, wires=i)
-                qml.RY(inputs[i] * np.pi, wires=i)
-            
+                qml.RX(inputs[..., i] * pi, wires=i)
+                qml.RY(inputs[..., i] * pi, wires=i)
+
             # Trainable quantum layers for feature extraction
             qml.StronglyEntanglingLayers(weights, wires=range(self.n_qubits))
-            
-            # Measure expectation values
+
+            # Measure expectation values - return list of measurements
             return [qml.expval(qml.PauliZ(i)) for i in range(self.n_qubits)]
-        
-        # Define weight shapes for the quantum circuit
-        weight_shapes = {
-            "weights": qml.StronglyEntanglingLayers.shape(
-                n_layers=self.n_layers, n_wires=self.n_qubits
-            )
-        }
-        
-        return qml.qnn.KerasLayer(quantum_circuit, weight_shapes, output_dim=self.n_qubits)
+
+        # Define weight shapes for the quantum circuit (store for build stage)
+        self._weight_shape = qml.StronglyEntanglingLayers.shape(
+            n_layers=self.n_layers, n_wires=self.n_qubits
+        )
+
+        # store circuit for use in call()
+        self.quantum_circuit = quantum_circuit
     
+    def build(self, input_shape):
+        # create weights variable here for proper Keras tracking
+        self.q_weights = self.add_weight(
+            name="q_weights",
+            shape=self._weight_shape,
+            initializer="random_normal",
+            trainable=True,
+            dtype=tf.float32,
+        )
+        super().build(input_shape)
+
+    def compute_output_shape(self, input_shape):
+        batch = input_shape[0]
+        h = input_shape[1] // 2 if input_shape[1] is not None else None
+        w = input_shape[2] // 2 if input_shape[2] is not None else None
+        return (batch, h, w, self.n_qubits)
+
     def call(self, x, training=None):
         """
         Process raw images through quantum preprocessing.
@@ -83,6 +97,9 @@ class QuantumImagePreprocessor(tf.keras.layers.Layer):
         Returns:
             (batch, height//2, width//2, n_qubits) - Quantum features
         """
+        # ensure float32 inputs to avoid mixed-type dispatch errors
+        if x.dtype != tf.float32:
+            x = tf.cast(x, tf.float32)
         batch_size = tf.shape(x)[0]
         height, width = x.shape[1], x.shape[2]
         out_height, out_width = height // 2, width // 2
@@ -101,17 +118,24 @@ class QuantumImagePreprocessor(tf.keras.layers.Layer):
         # Process all patches through quantum circuit
         # Flatten to (batch * out_height * out_width, 4)
         patches_flat = tf.reshape(x, (-1, 4))
+
+        # ensure all tensors have consistent dtype for quantum circuit
+        weights = tf.cast(self.q_weights, x.dtype)
+        if training is False:
+            weights = tf.stop_gradient(weights)
+
+        # Apply quantum preprocessing via qnode
+        quantum_features = self.quantum_circuit(patches_flat, weights)
         
-        # Apply quantum preprocessing
-        # Note: During training=True, quantum weights are trainable via backprop
-        # During training=False (validation/testing), quantum weights are frozen
-        quantum_features = self.qlayer(patches_flat)
-        
+        # Convert output to tensor first, then ensure float32 dtype
+        # PennyLane returns a list or array-like object; convert to tensor
+        quantum_features = tf.convert_to_tensor(quantum_features, dtype=tf.float32)
+
         # Reshape back to spatial format
         # (batch, out_height, out_width, n_qubits)
         output = tf.reshape(quantum_features, 
                           (batch_size, out_height, out_width, self.n_qubits))
-        
+
         return output
     
     def get_config(self):
@@ -172,6 +196,14 @@ class DualQuantumPreprocessor(tf.keras.layers.Layer):
         
         # Concatenate along channel dimension
         return tf.concat([q_features_1, q_features_2], axis=-1)
+    
+    def compute_output_shape(self, input_shape):
+        """Return output shape without tracing through the quantum circuit."""
+        batch_size = input_shape[0]
+        height = input_shape[1]
+        width = input_shape[2]
+        # Output: (batch, height//2, width//2, n_qubits * 2) due to dual paths
+        return (batch_size, height // 2, width // 2, self.n_qubits * 2)
     
     def get_config(self):
         config = super().get_config()

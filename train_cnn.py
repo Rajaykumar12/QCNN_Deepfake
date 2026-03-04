@@ -19,6 +19,17 @@ import argparse
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras import layers
+import os
+import warnings
+import logging
+
+# Suppress harmless TensorFlow casting warnings from PennyLane's complex→float conversion
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Reduce TF logging verbosity
+warnings.filterwarnings('ignore', category=UserWarning, message='.*casting an input of type complex128.*')
+
+# Suppress TensorFlow logger from printing the casting warning
+tf_logger = logging.getLogger('tensorflow')
+tf_logger.setLevel(logging.ERROR)
 
 # Try to import cv2, fallback if not available
 try:
@@ -260,24 +271,36 @@ def main():
 
     # ── Flexible Dataset Loading ──────────────────────────────────
     print(f"\n📂 Preparing dataset...")
-    
+
+    # Allow CLI override before searching defaults
+    dataset_dir = args.dataset_dir
+    if dataset_dir:
+        # resolve relative paths so validation is reliable
+        dataset_dir = os.path.abspath(dataset_dir)
+        print(f"👀 Using dataset path from argument: {dataset_dir}")
+        if not os.path.exists(dataset_dir):
+            print(f"❌ Provided dataset_dir does not exist: {dataset_dir}")
+            dataset_dir = None
+
     # Hardcoded dataset paths (prioritize Azure ML compute instance)
     dataset_paths = [
         '/home/azureuser/cloudfiles/code/deepfake_data/Dataset',
         './deepfake_data/Dataset',
         '/mnt/batch/tasks/shared/LS_root/mounts/clusters/rajaykumar129591/cloudfiles/code/deepfake_data/Dataset'
     ]
-    
-    dataset_dir = None
-    for path in dataset_paths:
-        if os.path.exists(path):
-            dataset_dir = path
-            print(f"✓ Found dataset at: {dataset_dir}")
-            break
+
+    if not dataset_dir:
+        for path in dataset_paths:
+            if os.path.exists(path):
+                dataset_dir = path
+                print(f"✓ Found dataset at: {dataset_dir}")
+                break
     
     if not dataset_dir:
         print("❌ Dataset not found at any expected location!")
         print("Expected paths:")
+        if args.dataset_dir:
+            print(f"  - provided: {args.dataset_dir}")
         for path in dataset_paths:
             print(f"  - {path}")
         
@@ -316,7 +339,22 @@ def main():
     # Auto-detect structure from dataset root
     structure_info = auto_detect_dataset_structure(dataset_dir)
     print(f"Auto-detected dataset structure: {structure_info}")
-    
+
+    # Compatibility layer for older versions of auto_detect_dataset_structure
+    # previous implementation returned 'has_train_test_structure'; new version
+    # uses 'has_train_subdir'/'has_test_subdir' and 'suggested_mode'.
+    if 'has_train_test_structure' not in structure_info:
+        # derive old-style flags
+        structure_info['has_train_test_structure'] = (
+            structure_info.get('has_train_subdir', False) and
+            structure_info.get('has_test_subdir', False)
+        )
+        # ensure train_dir/test_dir exist (new format already sets them)
+        structure_info.setdefault('train_dir', None)
+        structure_info.setdefault('test_dir', None)
+        # add data_dirs field to avoid KeyError later
+        structure_info.setdefault('data_dirs', [])
+
     if structure_info['has_train_test_structure']:
         # Found Train/Test directories - need to coordinate limits to stay within total
         train_dir = structure_info['train_dir']
@@ -334,28 +372,43 @@ def main():
         
         print(f"  Allocating: {max_train_samples} train + {max_test_samples} test = {args.max_samples} total")
         
-        # Load train data with allocated limit
-        all_images, all_labels = create_raw_image_loader(
+        # Load train data with allocated limit (loader may return 2 or more outputs)
+        loader_output = create_raw_image_loader(
             train_dir, classes=CLASSES, img_size=128,
             max_total_samples=max_train_samples,
             max_samples_per_class=args.max_per_class,
             balanced_sampling=not args.no_balanced_sampling
         )
-        
-        # Create train/val split from training data
-        from sklearn.model_selection import train_test_split
-        train_images, val_images, train_labels, val_labels = train_test_split(
-            all_images, all_labels, test_size=args.val_split, 
-            random_state=RANDOM_SEED, stratify=all_labels
-        )
+        # handle varying return formats
+        if isinstance(loader_output, tuple) and len(loader_output) >= 2:
+            all_images, all_labels = loader_output[0], loader_output[1]
+            # if loader already returned validation split, use it to avoid re-splitting
+            if len(loader_output) == 4:
+                train_images, train_labels, val_images, val_labels = loader_output
+                print("ℹ Using validation set provided by loader (train_val mode)")
+            else:
+                # fall back to manual split
+                from sklearn.model_selection import train_test_split
+                train_images, val_images, train_labels, val_labels = train_test_split(
+                    all_images, all_labels, test_size=args.val_split,
+                    random_state=RANDOM_SEED, stratify=all_labels
+                )
+        else:
+            raise ValueError(f"Unexpected return value from create_raw_image_loader: {loader_output}")
         
         # Load test data with remaining allocation
-        test_images, test_labels = create_raw_image_loader(
+        loader_output = create_raw_image_loader(
             test_dir, classes=CLASSES, img_size=128,
             max_total_samples=max_test_samples,
             max_samples_per_class=None,  # Use total limit instead
             balanced_sampling=not args.no_balanced_sampling
         )
+        if isinstance(loader_output, tuple) and len(loader_output) >= 2:
+            test_images, test_labels = loader_output[0], loader_output[1]
+            if len(loader_output) > 2:
+                print("⚠ Loader returned extra outputs for test set; ignoring them")
+        else:
+            raise ValueError(f"Unexpected return value from create_raw_image_loader: {loader_output}")
         
         total_dataset_size = len(all_images) + len(test_images)
         print(f"\n📊 Final dataset allocation:")
@@ -370,12 +423,25 @@ def main():
         data_dir = structure_info['data_dirs'][0] if structure_info['data_dirs'] else dataset_dir
         print(f"Using single directory with train/val split: {data_dir}")
         
-        all_images, all_labels = create_raw_image_loader(
+        loader_output = create_raw_image_loader(
             data_dir, classes=CLASSES, img_size=128,
             max_total_samples=args.max_samples,
             max_samples_per_class=args.max_per_class,
             balanced_sampling=not args.no_balanced_sampling
         )
+        if isinstance(loader_output, tuple) and len(loader_output) >= 2:
+            all_images, all_labels = loader_output[0], loader_output[1]
+            if len(loader_output) == 4:
+                train_images, train_labels, val_images, val_labels = loader_output
+                print("ℹ Using validation set provided by loader (train_val mode)")
+            else:
+                from sklearn.model_selection import train_test_split
+                train_images, val_images, train_labels, val_labels = train_test_split(
+                    all_images, all_labels, test_size=args.val_split,
+                    random_state=RANDOM_SEED, stratify=all_labels
+                )
+        else:
+            raise ValueError(f"Unexpected return value from create_raw_image_loader: {loader_output}")
         
         # Create train/val split (no separate test set)
         from sklearn.model_selection import train_test_split
@@ -432,13 +498,20 @@ def main():
     # ── Simple data augmentation for raw images ──────────
     if use_quantum_preprocessing:
         print("\n🔄 Setting up raw image augmentation...")
-        # Simple augmentation that works with raw grayscale images
+        # Create augmentation in float32 mode (not affected by mixed precision policy)
+        # Temporarily disable mixed precision for augmentation layer creation
+        original_policy = tf.keras.mixed_precision.global_policy()
+        tf.keras.mixed_precision.set_global_policy('float32')
+        
         augmentation = tf.keras.Sequential([
             layers.RandomRotation(0.05, fill_mode='constant', fill_value=0.0),
             layers.RandomTranslation(0.1, 0.1, fill_mode='constant', fill_value=0.0),
             layers.RandomBrightness(0.1, value_range=[0, 1]),
             layers.RandomContrast(0.1),
         ], name='raw_image_augmentation')
+        
+        # Re-enable mixed precision for training
+        tf.keras.mixed_precision.set_global_policy(original_policy)
         
         # Create datasets with augmentation
         train_dataset = tf.data.Dataset.from_tensor_slices((train_images, train_labels))

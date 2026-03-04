@@ -1,9 +1,11 @@
 # Core Deep Learning and Quantum ML
-# tensorflow>=2.20.0
-# pennylane>=0.34.0
+# tensorflow>=2.20.0  # Note: 2.13.0 more stable with CUDA 12.2 + scipy dependencies
+tensorflow==2.13.0  # Tested stable version
+pennylane>=0.34.0
 
 # Numerical Computing
-numpy>=1.24.0
+numpy==1.24.3  # Required for scipy<1.15 compatibility
+scipy>=1.12.0,<1.15  # For sklearn support
 
 # Image Processing
 Pillow>=10.0.0
@@ -20,5 +22,5 @@ seaborn>=0.11.0
 argparse  # Usually built-in but explicit for safety
 
 # Optional but recommended for performance
-tensorflow-gpu>=2.20.0  # Uncomment if using GPU
-pennylane[tf]>=0.34.0   # Uncomment for TensorFlow interface optimization
+# tensorflow-gpu>=2.20.0  # Uncomment if using GPU
+# pennylane[tf]>=0.34.0   # Uncomment for TensorFlow interface optimization
